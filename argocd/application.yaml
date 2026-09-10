@@ -1,0 +1,31 @@
+# The one thing applied by hand. Everything after this comes from Git.
+#
+# It lives OUTSIDE deploy/ on purpose -- Argo watches deploy/, and an
+# Application that manages itself is confusing to reason about when it breaks.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: scribe
+  namespace: argocd        # Applications always live here, not with the app
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/nazmur96/scribe.git
+    targetRevision: main   # the branch to follow
+    path: deploy           # the folder to read
+
+  destination:
+    server: https://kubernetes.default.svc   # this cluster
+    namespace: scribe
+
+  syncPolicy:
+    automated:
+      # Delete things you removed from Git. Without this, deleting a file
+      # leaves the object running in the cluster forever, and nobody knows
+      # why it is there.
+      prune: true
+
+      # Put back anything changed by hand. This is the line that turns Git
+      # from "a record of what we did" into "the only way to change things".
+      selfHeal: true
