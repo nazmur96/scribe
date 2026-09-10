@@ -1,0 +1,10 @@
+# Everything the build does not need. Smaller context means faster builds --
+# and .git in particular can be large.
+.git
+.github
+docs
+*.md
+Dockerfile
+.dockerignore
+/bin
+/dist

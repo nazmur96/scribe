@@ -1,0 +1,15 @@
+# A stable name and address for the pods. Pods come and go and their IPs
+# change; this does not. Anything inside the cluster reaches the API at
+# http://scribe-api.scribe.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: scribe-api
+  namespace: scribe
+spec:
+  selector:
+    app: scribe-api        # sends traffic to any pod with this label
+  ports:
+    - port: 80             # the port callers use
+      targetPort: 8080     # the port the container listens on
+

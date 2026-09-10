@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scribe-api
+  namespace: scribe
+spec:
+  # Two replicas, deliberately. Watch what happens when you create a job
+  # and then read it back. It will not behave the way you expect, and the
+  # reason is the point of the next day's work.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: scribe-api
+  template:
+    metadata:
+      labels:
+        app: scribe-api
+    spec:
+      securityContext:
+        runAsNonRoot: true       # refuse to start if the image runs as root
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          # Pinned to the commit, not to :dev. :dev moves, so a pod restarting
+          # next week could quietly come back as different code.
+          image: ghcr.io/nazmur96/scribe-api:7e39eac
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+          resources:
+            requests:            # what the scheduler reserves for it
+              cpu: 10m
+              memory: 32Mi
+            limits:              # killed if it goes past this
+              cpu: 200m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true   # it never writes to disk
+            capabilities:
+              drop: ["ALL"]
+          # Ready = send it traffic. Not ready = take it out of the Service.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          # Alive = leave it alone. Not alive = restart it.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15

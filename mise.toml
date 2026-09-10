@@ -1,2 +1,66 @@
+# Tool versions and common commands for scribe.
+#
+# Two jobs in one file:
+#   [tools] pins WHICH version of a tool this project uses
+#   [tasks] records the commands, so they live in Git rather than in memory
+
 [tools]
 go = "1.27.1"
+kubectl = "1.36.2"
+
+# ---------------------------------------------------------------------------
+# Tasks. Run with:  mise run <name>        (or:  mise run  to list them)
+#
+# These exist so the commands are written down once. CI will run the same
+# ones, which is how "works on my machine" stops happening -- your laptop and
+# the build server run identical commands, not similar ones.
+# ---------------------------------------------------------------------------
+
+[tasks.dev]
+description = "Run the API from source, no container. Fastest loop while coding."
+run = "go run ./cmd/api"
+
+[tasks.build]
+description = "Build the container image"
+run = "docker build -t scribe-api:dev ."
+
+[tasks.size]
+description = "Image size. The Go budget is 30MB -- a limit you never measure is not a limit."
+run = "docker images scribe-api:dev --format '{% raw %}{{.Size}}{% endraw %}'"
+[tasks.run]
+description = "Run the built image. Blocks -- curl it from another terminal."
+run = "docker run --rm -p 8080:8080 scribe-api:dev"
+
+[tasks.smoke]
+description = "Check a running API answers. Needs 'mise run run' in another terminal."
+run = """
+set -e
+curl -sS -f localhost:8080/healthz
+curl -sS -f -X POST localhost:8080/jobs -d '{"url":"https://example.com/x"}'; echo
+curl -sS -f localhost:8080/jobs/1; echo
+echo "--- these must fail ---"
+curl -sS -o /dev/null -w 'no such job:  %{http_code}\\n' localhost:8080/jobs/999
+curl -sS -o /dev/null -w 'bad json:     %{http_code}\\n' -X POST localhost:8080/jobs -d 'nope'
+curl -sS -o /dev/null -w 'missing url:  %{http_code}\\n' -X POST localhost:8080/jobs -d '{}'
+"""
+
+[tasks.tidy]
+description = "Sync go.mod with what the code actually imports"
+run = "go mod tidy"
+
+[tasks.vet]
+description = "Go's built-in bug finder. Catches real mistakes the compiler allows."
+run = "go vet ./..."
+
+
+[tasks.push]
+description = "Tag with the git sha and push both tags to ghcr.io"
+run = """
+set -e
+SHA=$(git rev-parse --short HEAD)
+docker tag scribe-api:dev ghcr.io/nazmur96/scribe-api:dev
+docker tag scribe-api:dev ghcr.io/nazmur96/scribe-api:$SHA
+docker push ghcr.io/nazmur96/scribe-api:dev
+docker push ghcr.io/nazmur96/scribe-api:$SHA
+echo "pushed $SHA"
+"""
