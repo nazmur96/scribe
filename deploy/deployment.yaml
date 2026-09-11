@@ -25,7 +25,7 @@ spec:
         - name: api
           # Pinned to the commit, not to :dev. :dev moves, so a pod restarting
           # next week could quietly come back as different code.
-          image: ghcr.io/nazmur96/scribe-api:7920495
+          image: ghcr.io/nazmur96/scribe-api:a71688b
           ports:
             - containerPort: 8080
           env:
