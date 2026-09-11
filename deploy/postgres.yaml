@@ -1,0 +1,21 @@
+
+# The shared, durable job store. Both api replicas point at this -- that is
+# the whole fix for "the two replicas disagree".
+#
+# 2 instances: one primary, one streaming replica. If the primary pod dies,
+# CNPG promotes the replica and the -rw service follows it automatically.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: scribe-postgres
+  namespace: scribe
+spec:
+  instances: 2
+
+  storage:
+    size: 10Gi
+
+  bootstrap:
+    initdb:
+      database: scribe
+      owner: scribe

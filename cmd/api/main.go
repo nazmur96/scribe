@@ -1,28 +1,25 @@
-// scribe api -- v0.1
+// scribe api -- v0.2
 //
-// Takes a URL, remembers it, hands it back. That is all it does today.
-//
-// There is no database yet: jobs live in a map that dies with the process.
-// That is on purpose. Today's goal is to prove the path from "code on my
-// laptop" to "container running on the cluster". Adding Postgres at the same
-// time would mean two new things breaking at once, with no way to tell which.
+// Same contract as before: take a URL, remember it, hand it back. What
+// changed is where "remember it" happens. Jobs used to live in a map that
+// died with the process. Now they live in Postgres, which is why two
+// replicas can finally agree with each other.
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver with database/sql
 )
 
 // Job is one piece of work: a URL someone wants transcribed.
-//
-// The `json:"..."` bits tell Go what to call each field when it turns this
-// into JSON. Without them you would get "ID" and "URL" instead of "id" and
-// "url".
 type Job struct {
 	ID        int       `json:"id"`
 	URL       string    `json:"url"`
@@ -30,64 +27,79 @@ type Job struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// store holds the jobs. A map, plus a lock.
-//
-// The lock matters: an HTTP server handles requests at the same time, on
-// different threads. Two of them writing to the same map at once will crash
-// Go outright -- it detects this and refuses to continue. The lock makes them
-// take turns.
-//
-// This whole type disappears on day 3, when Postgres takes over. Postgres
-// handles the taking-turns part itself, which is most of why databases exist.
+// store talks to Postgres. No mutex, no map -- Postgres does the
+// taking-turns itself, which is most of why databases exist.
 type store struct {
-	mu     sync.Mutex
-	jobs   map[int]Job
-	nextID int
+	db *sql.DB
 }
 
-func newStore() *store {
-	return &store{jobs: make(map[int]Job), nextID: 1}
+func newStore(db *sql.DB) *store {
+	return &store{db: db}
 }
 
-func (s *store) add(url string) Job {
-	s.mu.Lock()
-	defer s.mu.Unlock() // runs when this function returns, even if it panics
+const createJobsTable = `
+CREATE TABLE IF NOT EXISTS jobs (
+	id         BIGSERIAL PRIMARY KEY,
+	url        TEXT NOT NULL,
+	state      TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`
 
-	j := Job{
-		ID:        s.nextID,
-		URL:       url,
-		State:     "queued",
-		CreatedAt: time.Now().UTC(),
+func (s *store) add(ctx context.Context, url string) (Job, error) {
+	var j Job
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO jobs (url, state) VALUES ($1, 'queued')
+		 RETURNING id, url, state, created_at`,
+		url,
+	).Scan(&j.ID, &j.URL, &j.State, &j.CreatedAt)
+	return j, err
+}
+
+func (s *store) get(ctx context.Context, id int) (Job, bool, error) {
+	var j Job
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, url, state, created_at FROM jobs WHERE id = $1`, id,
+	).Scan(&j.ID, &j.URL, &j.State, &j.CreatedAt)
+	switch {
+	case err == sql.ErrNoRows:
+		return Job{}, false, nil
+	case err != nil:
+		return Job{}, false, err
 	}
-	s.jobs[j.ID] = j
-	s.nextID++
-	return j
-}
-
-func (s *store) get(id int) (Job, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	j, ok := s.jobs[id]
-	return j, ok
+	return j, true, nil
 }
 
 func main() {
-	// Read the port from the environment, fall back to 8080.
-	//
-	// Hardcoding a port is fine until something else already uses it. Reading
-	// it from the environment is how every container platform expects to
-	// configure a service, Kubernetes included.
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	st := newStore()
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		log.Fatalf("cannot open database: %v", err)
+	}
+	defer db.Close()
+
+	// Fail fast at startup if Postgres is unreachable, rather than let every
+	// request find out one at a time.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		log.Fatalf("cannot reach postgres: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, createJobsTable); err != nil {
+		log.Fatalf("cannot create jobs table: %v", err)
+	}
+
+	st := newStore(db)
 	mux := http.NewServeMux()
 
-	// Since Go 1.22, ServeMux understands "METHOD /path/{name}". Before that
-	// everyone reached for a third-party router. We do not need one.
 	mux.HandleFunc("POST /jobs", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			URL string `json:"url"`
@@ -101,11 +113,13 @@ func main() {
 			return
 		}
 
-		j := st.add(body.URL)
+		j, err := st.add(r.Context(), body.URL)
+		if err != nil {
+			log.Printf("insert job: %v", err)
+			http.Error(w, "could not save job", http.StatusInternalServerError)
+			return
+		}
 
-		// 202 Accepted, not 200 OK. It means "I have taken this, but I have
-		// not done it yet" -- which is exactly true, and will still be true
-		// when a real worker takes twenty minutes over it.
 		writeJSON(w, http.StatusAccepted, j)
 	})
 
@@ -116,7 +130,12 @@ func main() {
 			return
 		}
 
-		j, ok := st.get(id)
+		j, ok, err := st.get(r.Context(), id)
+		if err != nil {
+			log.Printf("get job: %v", err)
+			http.Error(w, "could not read job", http.StatusInternalServerError)
+			return
+		}
 		if !ok {
 			http.Error(w, "no such job", http.StatusNotFound)
 			return
@@ -136,7 +155,7 @@ func main() {
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second, // refuse clients that connect and then say nothing
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	log.Printf("scribe api listening on :%s", port)

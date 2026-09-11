@@ -25,12 +25,17 @@ spec:
         - name: api
           # Pinned to the commit, not to :dev. :dev moves, so a pod restarting
           # next week could quietly come back as different code.
-          image: ghcr.io/nazmur96/scribe-api:7e39eac
+          image: ghcr.io/nazmur96/scribe-api:7920495
           ports:
             - containerPort: 8080
           env:
             - name: PORT
               value: "8080"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: scribe-postgres-app
+                  key: uri
           resources:
             requests:            # what the scheduler reserves for it
               cpu: 10m
